@@ -18,10 +18,9 @@ using System.Linq;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
-using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
-using System.Threading.Tasks;
+using ServiceStack.Redis.Interception;
 using ServiceStack.Text;
 
 namespace ServiceStack.Redis
@@ -30,12 +29,10 @@ namespace ServiceStack.Redis
     {
         private const string OK = "OK";
         private const string QUEUED = "QUEUED";
-        private static Timer UsageTimer;
 
-        private static int __requestsPerHour = 0;
         public static int RequestsPerHour
         {
-            get { return __requestsPerHour; }
+            get { return 1; }
         }
 
         private const int Unknown = -1;
@@ -51,31 +48,10 @@ namespace ServiceStack.Redis
 
         public static void DisposeTimers()
         {
-            if (UsageTimer == null) return;
-            try
-            {
-                UsageTimer.Dispose();
-            }
-            finally
-            {
-                UsageTimer = null;
-            }
         }
 
         private void Connect()
         {
-            if (UsageTimer == null)
-            {
-                //Save Timer Resource for licensed usage
-                if (!LicenseUtils.HasLicensedFeature(LicenseFeature.Redis))
-                {
-                    UsageTimer = new Timer(delegate
-                    {
-                        __requestsPerHour = 0;
-                    }, null, TimeSpan.FromMilliseconds(0), TimeSpan.FromHours(1));
-                }
-            }
-
             socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp)
             {
                 SendTimeout = SendTimeout,
@@ -378,13 +354,6 @@ namespace ServiceStack.Redis
         /// <returns></returns>
         protected void WriteCommandToSendBuffer(params byte[][] cmdWithBinaryArgs)
         {
-            if (Pipeline == null && Transaction == null)
-            {
-                Interlocked.Increment(ref __requestsPerHour);
-                if (__requestsPerHour % 20 == 0)
-                    LicenseUtils.AssertValidUsage(LicenseFeature.Redis, QuotaType.RequestsPerHour, __requestsPerHour);
-            }
-
             if (log.IsDebugEnabled && !RedisConfig.DisableVerboseLogging)
                 CmdLog(cmdWithBinaryArgs);
 
@@ -422,7 +391,7 @@ namespace ServiceStack.Redis
             }
         }
 
-        readonly IList<ArraySegment<byte>> cmdBuffer = new List<ArraySegment<byte>>();
+        IList<ArraySegment<byte>> cmdBuffer = new List<ArraySegment<byte>>();
         byte[] currentBuffer = BufferPool.GetBuffer();
         int currentBufferIndex;
 
@@ -475,6 +444,11 @@ namespace ServiceStack.Redis
         {
             if (currentBufferIndex > 0)
                 PushCurrentBuffer();
+
+            if (CommandInterceptor.InterceptFlushSendBuffer != null)
+            {
+                cmdBuffer = CommandInterceptor.InterceptFlushSendBuffer(this, cmdBuffer);
+            }
 
             if (cmdBuffer.Count > 0)
             {
